@@ -370,15 +370,64 @@ typedef void(^SBTStubUpdateBlock)(NSURLRequest *request);
     return (matchingRules != nil);
 }
 
-+ (NSURLRequest *)canonicalRequestForRequest:(NSURLRequest *)request
-{
-    return request;
++ (NSURLRequest *)canonicalRequestForRequest:(NSURLRequest *)request {
+    NSMutableURLRequest *mutableRequest = [request mutableCopy];
+    
+    // For async requests, the body might be in the HTTPBodyStream
+    if (request.HTTPBodyStream && !request.HTTPBody) {
+        NSData *bodyData = [self drainInputStream:request.HTTPBodyStream];
+        [mutableRequest setHTTPBody:bodyData];
+        
+        if (bodyData) {
+            [mutableRequest setHTTPBodyStream:[NSInputStream inputStreamWithData:bodyData]];
+        }
+    }
+    
+    return mutableRequest;
+}
+
++ (NSData *)drainInputStream:(NSInputStream *)stream {
+    if (!stream) return nil;
+
+    NSMutableData *data = [NSMutableData data];
+    uint8_t buffer[4096];
+
+    BOOL shouldClose = (stream.streamStatus == NSStreamStatusNotOpen);
+    if (shouldClose) {
+        [stream open];
+    }
+
+    @try {
+        NSInteger bytesRead;
+        while ((bytesRead = [stream read:buffer maxLength:sizeof(buffer)]) > 0) {
+            [data appendBytes:buffer length:bytesRead];
+        }
+    } @finally {
+        if (shouldClose) {
+            [stream close];
+        }
+    }
+
+    return data.length > 0 ? data : nil;
 }
 
 + (BOOL)requestIsCacheEquivalent:(NSURLRequest *)a toRequest:(NSURLRequest *)b
 {
     BOOL isCacheEquivalent = [super requestIsCacheEquivalent:a toRequest:b];
     return isCacheEquivalent;
+}
+
++ (NSData *)extractBodyDataFromRequest:(NSURLRequest *)request {
+    if ([request HTTPBody]) {
+        return [request HTTPBody];
+    } else if ([request HTTPBodyStream]) {
+        return [SBTProxyURLProtocol drainInputStream:[request HTTPBodyStream]];
+    } else if ([request respondsToSelector:@selector(sbt_isUploadTaskRequest)] &&
+               [request sbt_isUploadTaskRequest] &&
+               [request respondsToSelector:@selector(sbt_uploadHTTPBody)]) {
+        return [request sbt_uploadHTTPBody];
+    }
+    return nil;
 }
 
 - (void)startLoading
@@ -432,9 +481,7 @@ typedef void(^SBTStubUpdateBlock)(NSURLRequest *request);
                 monitoredRequest.isStubbed = YES;
                 monitoredRequest.isRewritten = NO;
                 
-                NSData *bodyData = ([monitoredRequest.originalRequest sbt_isUploadTaskRequest]) ? [monitoredRequest.originalRequest sbt_uploadHTTPBody] : monitoredRequest.originalRequest.HTTPBody;
-                
-                monitoredRequest.requestData = bodyData;
+                monitoredRequest.requestData = [SBTProxyURLProtocol extractBodyDataFromRequest:monitoredRequest.originalRequest];
                 
                 dispatch_sync([SBTProxyURLProtocol sharedInstance].monitoredRequestsSyncQueue, ^{
                     [[SBTProxyURLProtocol sharedInstance].monitoredRequests addObject:monitoredRequest];
@@ -483,8 +530,16 @@ typedef void(^SBTStubUpdateBlock)(NSURLRequest *request);
         __unused SBTRequestMatch *requestMatch4 = stubRule[SBTProxyURLProtocolMatchingRuleKey];
         __unused SBTRequestMatch *requestMatch5 = monitorRule[SBTProxyURLProtocolMatchingRuleKey];
         NSLog(@"[SBTUITestTunnel] Throttling/monitoring/chaning cookies/stubbing headers %@ request: %@\n\nMatching rule:\n%@", [self.request HTTPMethod], [self.request URL], requestMatch1 ?: requestMatch2 ?: requestMatch3 ?: requestMatch4 ?: requestMatch5);
-        
         NSMutableURLRequest *newRequest = [self.request mutableCopy];
+        NSData *bodyData = [SBTProxyURLProtocol extractBodyDataFromRequest:self.request];
+        if (bodyData) {
+            [newRequest setHTTPBody:bodyData];
+            if (![newRequest valueForHTTPHeaderField:@"Content-Length"]) {
+                [newRequest setValue:[NSString stringWithFormat:@"%lu", (unsigned long)bodyData.length]
+                     forHTTPHeaderField:@"Content-Length"];
+            }
+        }
+        
         [SBTRequestPropertyStorage setProperty:@YES forKey:SBTProxyURLProtocolHandledKey inRequest:newRequest];
         
         NSURLSessionConfiguration *configuration = [NSURLSessionConfiguration defaultSessionConfiguration];
@@ -615,9 +670,7 @@ typedef void(^SBTStubUpdateBlock)(NSURLRequest *request);
         monitoredRequest.isStubbed = NO;
         monitoredRequest.isRewritten = isRequestRewritten;
         
-        NSData *bodyData = ([monitoredRequest.originalRequest sbt_isUploadTaskRequest]) ? [monitoredRequest.originalRequest sbt_uploadHTTPBody] : monitoredRequest.originalRequest.HTTPBody;
-        
-        monitoredRequest.requestData = bodyData;
+        monitoredRequest.requestData = [SBTProxyURLProtocol extractBodyDataFromRequest:monitoredRequest.originalRequest];
         
         dispatch_sync([SBTProxyURLProtocol sharedInstance].monitoredRequestsSyncQueue, ^{
             [[SBTProxyURLProtocol sharedInstance].monitoredRequests addObject:monitoredRequest];
