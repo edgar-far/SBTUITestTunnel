@@ -373,61 +373,18 @@ typedef void(^SBTStubUpdateBlock)(NSURLRequest *request);
 + (NSURLRequest *)canonicalRequestForRequest:(NSURLRequest *)request {
     NSMutableURLRequest *mutableRequest = [request mutableCopy];
     
-    // For async requests, the body might be in the HTTPBodyStream
-    if (request.HTTPBodyStream && !request.HTTPBody) {
-        NSData *bodyData = [self drainInputStream:request.HTTPBodyStream];
+    NSData *bodyData = [SBTAsyncRequestHandler extractBodyDataFromRequest:request];
+    if (bodyData) {
         [mutableRequest setHTTPBody:bodyData];
-        
-        if (bodyData) {
-            [mutableRequest setHTTPBodyStream:[NSInputStream inputStreamWithData:bodyData]];
-        }
     }
     
     return mutableRequest;
-}
-
-+ (NSData *)drainInputStream:(NSInputStream *)stream {
-    if (!stream) return nil;
-
-    NSMutableData *data = [NSMutableData data];
-    uint8_t buffer[4096];
-
-    BOOL shouldClose = (stream.streamStatus == NSStreamStatusNotOpen);
-    if (shouldClose) {
-        [stream open];
-    }
-
-    @try {
-        NSInteger bytesRead;
-        while ((bytesRead = [stream read:buffer maxLength:sizeof(buffer)]) > 0) {
-            [data appendBytes:buffer length:bytesRead];
-        }
-    } @finally {
-        if (shouldClose) {
-            [stream close];
-        }
-    }
-
-    return data.length > 0 ? data : nil;
 }
 
 + (BOOL)requestIsCacheEquivalent:(NSURLRequest *)a toRequest:(NSURLRequest *)b
 {
     BOOL isCacheEquivalent = [super requestIsCacheEquivalent:a toRequest:b];
     return isCacheEquivalent;
-}
-
-+ (NSData *)extractBodyDataFromRequest:(NSURLRequest *)request {
-    if ([request HTTPBody]) {
-        return [request HTTPBody];
-    } else if ([request HTTPBodyStream]) {
-        return [SBTProxyURLProtocol drainInputStream:[request HTTPBodyStream]];
-    } else if ([request respondsToSelector:@selector(sbt_isUploadTaskRequest)] &&
-               [request sbt_isUploadTaskRequest] &&
-               [request respondsToSelector:@selector(sbt_uploadHTTPBody)]) {
-        return [request sbt_uploadHTTPBody];
-    }
-    return nil;
 }
 
 - (void)startLoading
@@ -480,8 +437,9 @@ typedef void(^SBTStubUpdateBlock)(NSURLRequest *request);
                 
                 monitoredRequest.isStubbed = YES;
                 monitoredRequest.isRewritten = NO;
+            
                 
-                monitoredRequest.requestData = [SBTProxyURLProtocol extractBodyDataFromRequest:monitoredRequest.originalRequest];
+                monitoredRequest.requestData = [SBTAsyncRequestHandler extractBodyDataFromRequest:monitoredRequest.originalRequest];
                 
                 dispatch_sync([SBTProxyURLProtocol sharedInstance].monitoredRequestsSyncQueue, ^{
                     [[SBTProxyURLProtocol sharedInstance].monitoredRequests addObject:monitoredRequest];
@@ -531,7 +489,7 @@ typedef void(^SBTStubUpdateBlock)(NSURLRequest *request);
         __unused SBTRequestMatch *requestMatch5 = monitorRule[SBTProxyURLProtocolMatchingRuleKey];
         NSLog(@"[SBTUITestTunnel] Throttling/monitoring/chaning cookies/stubbing headers %@ request: %@\n\nMatching rule:\n%@", [self.request HTTPMethod], [self.request URL], requestMatch1 ?: requestMatch2 ?: requestMatch3 ?: requestMatch4 ?: requestMatch5);
         NSMutableURLRequest *newRequest = [self.request mutableCopy];
-        NSData *bodyData = [SBTProxyURLProtocol extractBodyDataFromRequest:self.request];
+        NSData *bodyData = [SBTAsyncRequestHandler extractBodyDataFromRequest:self.request];
         if (bodyData) {
             [newRequest setHTTPBody:bodyData];
             if (![newRequest valueForHTTPHeaderField:@"Content-Length"]) {
@@ -670,7 +628,7 @@ typedef void(^SBTStubUpdateBlock)(NSURLRequest *request);
         monitoredRequest.isStubbed = NO;
         monitoredRequest.isRewritten = isRequestRewritten;
         
-        monitoredRequest.requestData = [SBTProxyURLProtocol extractBodyDataFromRequest:monitoredRequest.originalRequest];
+        monitoredRequest.requestData = [SBTAsyncRequestHandler extractBodyDataFromRequest:monitoredRequest.originalRequest];
         
         dispatch_sync([SBTProxyURLProtocol sharedInstance].monitoredRequestsSyncQueue, ^{
             [[SBTProxyURLProtocol sharedInstance].monitoredRequests addObject:monitoredRequest];
